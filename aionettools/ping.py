@@ -2,8 +2,7 @@ import os
 import argparse
 import socket
 import asyncio
-import struct 
-import random
+import struct
 from timeit import default_timer as timer
 
 ICMP_ECHO_REQUEST = 8
@@ -16,16 +15,40 @@ def checksum(data):
     for i in range(0, len(data), 2):
         sum += data[i] * 256 + data[i + 1]       
     if len(data) & 1:
-        sum += buffer[-1]
+        sum += data[-1]
     while sum >> 16:
         sum = (sum & 0xffff) + (sum >> 16)
     return ~sum & 0xffff
-         
+
 
 class IcmpProtocol:
     pending_pings = {}
     echo_id = os.getpid()
     echo_seq = 0
+    
+    @staticmethod
+    async def create(family):
+        if family == socket.AddressFamily.AF_INET:
+            sock = socket.socket(socket.AddressFamily.AF_INET, socket.SOCK_RAW, socket.getprotobyname("icmp"))
+        elif family == socket.AddressFamily.AF_INET6:
+            sock = socket.socket(socket.AddressFamily.AF_INET6, socket.SOCK_RAW, socket.getprotobyname("ipv6-icmp"))
+        sock.setblocking(False)
+        
+        protocol = IcmpProtocol()
+        loop = asyncio.get_event_loop()
+        waiter = loop.create_future()
+        
+        transport = loop._make_datagram_transport(
+            sock=sock, protocol=protocol, address=None, waiter=waiter)
+        
+        await waiter
+        return protocol
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        self.transport.close()
     
     def connection_made(self, transport):
         self.transport = transport
@@ -40,7 +63,7 @@ class IcmpProtocol:
         print('Error received:', exc)
         
     def datagram_received(self, data, addr):
-        print('Received:', data, addr)
+        #print('Received:', data, addr)
         
         if self.family == socket.AddressFamily.AF_INET:
             ip_data = data[0:20]
@@ -110,26 +133,7 @@ class IcmpProtocol:
         finally:
             if IcmpProtocol.pending_pings.get(id_seq, None) == waiter:
                 del IcmpProtocol.pending_pings[id_seq]
-        
-        
-        
-async def createIcmpProtocol(family):
-    if family == socket.AddressFamily.AF_INET:
-        sock = socket.socket(socket.AddressFamily.AF_INET, socket.SOCK_RAW, socket.getprotobyname("icmp"))
-    elif family == socket.AddressFamily.AF_INET6:
-        sock = socket.socket(socket.AddressFamily.AF_INET6, socket.SOCK_RAW, socket.getprotobyname("ipv6-icmp"))
-    sock.setblocking(False)
-    
-    protocol = IcmpProtocol()
-    loop = asyncio.get_event_loop()
-    waiter = loop.create_future()
-    
-    transport = loop._make_datagram_transport(
-        sock=sock, protocol=protocol, address=None, waiter=waiter)
-    
-    await waiter
-    return protocol
-
+ 
 async def main():
     parser = argparse.ArgumentParser(description='Ping')
     parser.add_argument('host', metavar='HOST', nargs='?', default="example.com", help="Host to ping")
@@ -140,8 +144,7 @@ async def main():
     family = addr[0]
     addr = addr[4]
     print(f"addr: {addr}, family={repr(family)}")
-    icmp = await createIcmpProtocol(family)
-    try:
+    async with await IcmpProtocol.create(family) as icmp:
         while True:
             try:
                 print(f"Pong: {await icmp.ping(addr, timeout=1):.1f}ms")
@@ -150,7 +153,6 @@ async def main():
             except:
                 print(f"Pong failed")
             break
-    finally:
-        icmp.transport.close()
 
-asyncio.run(main())
+if __name__ == "__main__":
+    asyncio.run(main())
