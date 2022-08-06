@@ -1,49 +1,179 @@
-from .ping import IcmpProtocol
-import argparse
+from __future__ import annotations
+from asyncio import Future, Queue, Task
+from enum import Enum, auto
+import itertools
+import json
+from typing import Any, List, Mapping, Optional
+import httpx
 import asyncio
-import socket
 import random
 
-async def getaddr(server):
-    hostname = server["host"].split(":")[0]
-    loop = asyncio.get_event_loop()
-    addrs = [
-        addr
-        for addr in await loop.getaddrinfo(hostname, 80, type=socket.SocketKind.SOCK_STREAM)
-        if addr[0] in [socket.AddressFamily.AF_INET, socket.AddressFamily.AF_INET6]
-    ]
-    assert addrs, f"Couldn't resolve {hostname}"
-    server["addrs"] = addrs
-    #print(f"{hostname} -> {addrs}")
-    return server
+import websockets
+from aionettools.ping import ping_pretty
+from aionettools.tcpinfo import get_tcpinfo
 
-async def ping_server(server, icmp, icmp6):
-    addr = random.choice(server["addrs"])
-    family, addr = addr[0], addr[4]
+from aionettools.util import format_ip_port, get_sock_from_websocket, resolve_address, resolve_addresses, timer
 
-    if family == socket.AddressFamily.AF_INET:
-        ping = icmp.ping(addr, timeout=1)
-    elif family == socket.AddressFamily.AF_INET6:
-        ping = icmp6.ping(addr, timeout=1)
+class Direction(Enum):
+    download = auto()
+    upload = auto()
 
-    try:
-        print(f"Ping {server['host']}: {await ping:.1f}ms")
-    except asyncio.CancelledError:
-        raise
-    except Exception as ex:
-        print(f"Ping {server['host']} failed: {ex}")
+    @property
+    def reversed(self):
+        if self == NDT7.Direction.download:
+            return NDT7.Direction.upload
+        else:
+            return NDT7.Direction.download
 
-async def main():
-    parser = argparse.ArgumentParser(description='speedtest with ndt7')
-    parser.add_argument('--endpoint', metavar='INTERVAL', default=0.1, help="Interval between sending ping")
-    args = parser.parse_args()
+class Role(Enum):
+    client = auto()
+    server = auto()
     
-    async with await IcmpProtocol.create(socket.AddressFamily.AF_INET) as icmp, \
-               await IcmpProtocol.create(socket.AddressFamily.AF_INET6) as icmp6:
-        while True:
-            for server in resolved_servers:
-                asyncio.create_task(ping_server(server, icmp, icmp6))
-                await asyncio.sleep(args.interval)
-            print("=======================")
+class NDT7:
+    @staticmethod
+    async def get_nearest_servers():
+        async with httpx.AsyncClient() as client:
+            response = await client.get('https://locate.measurementlab.net/v2/nearest/ndt/ndt7', follow_redirects=True)
+            data = response.json()
+            return [
+                NDT7.Client(machine=result["machine"], urls=result["urls"])
+                for result in data["results"]
+            ]
 
-asyncio.run(main())
+    @staticmethod
+    async def get_nearest_server():
+        return (await NDT7.get_nearest_servers())[0]
+
+    async def handle_websocket(websocket: websockets.WebSocketCommonProtocol, direction: Direction, role: Role = Role.client, max_duration: float = 13):
+        sock = get_sock_from_websocket(websocket)
+        local_ip_port = format_ip_port(sock.getsockname()) if sock else None
+        remote_ip_port = format_ip_port(sock.getpeername()) if sock else None
+        transferred_bytes = 0
+    
+        measurements_queue = Queue()
+
+        measurement_period = .1
+        start = timer()
+        
+        async def producer_handler():
+            nonlocal transferred_bytes
+            measurement_direction = Direction.upload if role == Role.client else Direction.download
+            next_measurement = timer() - measurement_period
+
+            async def measure():
+                elapsed_us = int(1e6 * (timer() - start))
+                tcpinfo = get_tcpinfo(sock)
+                #print(tcpinfo)
+                measurement = {
+                    "AppInfo": {
+                        "ElapsedTime": elapsed_us,
+                        "NumBytes": transferred_bytes,
+                    },
+                    "Origin": role.name,
+                    "Test": direction.name,
+                }
+                if local_ip_port and remote_ip_port and role == Role.server:
+                    measurement["ConnectionInfo"] = {
+                        "Client": remote_ip_port,
+                        "Server": local_ip_port,
+                    }
+                if tcpinfo is not None:
+                    measurement["TCPInfo"] = {
+                        "BusyTime": tcpinfo.tcpi_busy_time,
+                        "BytesAcked": tcpinfo.tcpi_bytes_acked,
+                        "BytesReceived": tcpinfo.tcpi_bytes_received,
+                        "BytesSent": tcpinfo.tcpi_bytes_sent,
+                        "BytesRetrans": tcpinfo.tcpi_bytes_retrans,
+                        "ElapsedTime": elapsed_us,
+                        "MinRTT": tcpinfo.tcpi_min_rtt,
+                        "RTT": tcpinfo.tcpi_rtt,
+                        "RTTVar": tcpinfo.tcpi_rttvar,
+                        "RWndLimited": tcpinfo.tcpi_rwnd_limited,
+                        "SndBufLimited": tcpinfo.tcpi_sndbuf_limited
+                    }
+
+                measurements_queue.put_nowait((measurement_direction, measurement))
+                return measurement
+
+            msg_size = (1 << 13)
+            while True:
+                now = timer()
+                time_until_measurement = next_measurement - now
+                if time_until_measurement <= 0:
+                    measurement = await measure()
+                    await websocket.send(json.dumps(measurement))
+                    next_measurement = now + measurement_period
+
+                elif (role, direction) in [(Role.client, Direction.upload), (Role.server, Direction.download)]:
+                    # Adjust message size
+                    if msg_size < (1 << 24) and msg_size < transferred_bytes / 16:
+                        msg_size *= 2
+                    # Send random data
+                    await websocket.send(random.randbytes(msg_size))
+                    transferred_bytes += msg_size
+
+                else:
+                    await asyncio.sleep(time_until_measurement)
+
+        async def consumer_handler():
+            nonlocal transferred_bytes
+            measurement_direction = Direction.download if role == Role.client else Direction.upload
+
+            async for message in websocket:
+                if isinstance(message, bytes):
+                    transferred_bytes += len(message)
+                else:
+                    measurement = json.loads(message)
+                    measurements_queue.put_nowait((measurement_direction, measurement))
+
+        tasks: List[Task] = list(map(asyncio.create_task, [consumer_handler(), producer_handler(), asyncio.sleep(max_duration)]))
+        def cancel_all():
+            measurements_queue.put_nowait(None)
+            for task in tasks:
+                task.cancel()
+        for task in tasks:
+            task.add_done_callback(lambda task: cancel_all())
+        
+        try:
+            while True:
+                measurement = await measurements_queue.get()
+                if measurement is None:
+                    break
+                yield measurement
+        finally:
+            cancel_all()
+
+
+    class Client:
+        def __init__(self, machine: str, urls: Mapping[str, str] = None) -> None:
+            self.machine = machine
+            self.urls = urls
+
+        async def test(self, direction: NDT7.Direction):
+            custom_headers = {"User-Agent": "aionettools"}
+            url = self.urls.get(f"wss:///ndt/v7/{direction.name}") or self.urls.get(f"ws:///ndt/v7/{direction.name}")
+            websocket_subprotocol = "net.measurementlab.ndt.v7"
+            async with websockets.connect(url, subprotocols=[websocket_subprotocol], extra_headers=custom_headers) as websocket:
+                async for direction, measurement in NDT7.handle_websocket(websocket, direction):
+                    yield direction, measurement
+
+        async def test_pretty(self, direction: NDT7.Direction):
+            from aionettools.ndt7_progress import TransferSpeedBar
+            with TransferSpeedBar(direction) as bar:
+                async for measurement_direction, measurement_data in self.test(direction):
+                    if measurement_direction == direction:
+                        bar.update(measurement=measurement_data)
+
+def create_subcommand(parser: argparse.ArgumentParser, subparsers: argparse._SubParsersAction):
+    async def cmd(args):
+        server = await NDT7.get_nearest_server()
+        print(f"Using {server.machine}")
+        await ping_pretty([server.machine], count=100, interval=0.05, verbose=False)        
+        await server.test_pretty(Direction.download)
+        await server.test_pretty(Direction.upload)
+
+    cmd_parser = subparsers.add_parser(
+        'ndt7',
+        description='Uses NDT7 protocol to measure network performance',
+    )
+    cmd_parser.set_defaults(cmd=cmd)

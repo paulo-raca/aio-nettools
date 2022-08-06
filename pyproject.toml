@@ -10,6 +10,12 @@ speedtest = "^0.0.1"
 cachetools = "^5.2.0"
 aiotestspeed = "^0.0.1"
 typing-extensions = "^4.3.0"
+httpx = "^0.23.0"
+websockets = "^10.3"
+tcpinfo = "^0.2.2"
+progressbar2 = "^4.0.0"
+more-itertools = "^8.13.0"
+termcolor = "^1.1.0"
 
 [tool.poetry.dev-dependencies]
 

@@ -2,6 +2,8 @@ from dataclasses import dataclass, field
 import argparse
 from enum import Enum, auto
 from ipaddress import _BaseAddress, IPv4Address, IPv6Address
+import itertools
+import more_itertools
 import random
 import socket
 import asyncio
@@ -16,7 +18,7 @@ from typing_extensions import Self
 from .util import resolve_addresses
 
 @dataclass
-class PingResponse:
+class PingResult:
     class Status(Enum):
         PENDING = auto()
         SUCESS = auto()
@@ -43,7 +45,7 @@ class PingResponse:
         return self.end - self.start
 
     def complete(self, status: Status):
-        if self.status == PingResponse.Status.PENDING:
+        if self.status == PingResult.Status.PENDING:
             self.status = status
             self.end = timer()
             self._future.set_result(self)
@@ -57,7 +59,7 @@ class Ping:
     def __init__(self) -> None:
         self.echo_seq = 0
         self.loop = asyncio.get_event_loop()
-        self.pending_pings: Mapping[int, PingResponse] = {}
+        self.pending_pings: Mapping[int, PingResult] = {}
         self.sockets: Mapping[AddressFamily, socket.socket] = {}
         self.pending_sends: Mapping[AddressFamily, List[Tuple[bytes, _BaseAddress]]] = {}
 
@@ -77,7 +79,7 @@ class Ping:
             self.loop.remove_writer(sock)
             sock.close()
         for pending_ping in self.pending_pings.values():
-            pending_ping.complete(PingResponse.Status.CANCELED)
+            pending_ping.complete(PingResult.Status.CANCELED)
 
     def recv_ready(self, sock: socket.socket):
         data, address = sock.recvfrom(4096)
@@ -95,7 +97,7 @@ class Ping:
             key = (seq, payload)
             pending_ping = self.pending_pings.get(key)
             if pending_ping and pending_ping.payload == payload:
-                pending_ping.complete(PingResponse.Status.SUCESS)
+                pending_ping.complete(PingResult.Status.SUCESS)
         else:
             #print(f"Discarding unexpected ICMP package: addr={addr}, type={type}, code={code}, remaining={remaining}")
             pass
@@ -133,7 +135,7 @@ class Ping:
         payload = bytes([random.getrandbits(8) for i in range(10)])
         packet = header + payload
         
-        pending_ping = PingResponse(addr=addr, seq=seq, payload=payload)
+        pending_ping = PingResult(addr=addr, seq=seq, payload=payload)
         for key, value in kwargs.items():
             if hasattr(pending_ping, key):
                 raise ValueError(f"Cannot specify reserver field '{key}'")
@@ -150,73 +152,102 @@ class Ping:
         if timeout is not None:
             loop = asyncio.get_event_loop()
             def on_timeout():
-                pending_ping.complete(PingResponse.Status.TIMEOUT)
+                pending_ping.complete(PingResult.Status.TIMEOUT)
             timeout_handle = loop.call_later(timeout, on_timeout)
             ret.add_done_callback(lambda _: timeout_handle.cancel())
         return ret
 
     async def wait_pending(self):
-        await asyncio.gather(*[pending.future for pending in self.pending_pings.values()], return_exceptions=True)
+        await asyncio.gather(*[pending._future for pending in self.pending_pings.values()], return_exceptions=True)
 
-async def main():
-    parser = argparse.ArgumentParser(description='Ping')
-    parser.add_argument('hostname', metavar='HOST', nargs='?', default="example.com", help="Host to ping")
-    parser.add_argument('--count', '-c', metavar='COUNT', type=int, default=None, help="Stop after sending COUNT ECHO_REQUEST packets")
-    parser.add_argument('--interval', '-i', metavar='INTERVAL', type=float, default=None, help="Wait INTERVAL seconds between sending each packet")
-    parser.add_argument('--timeout', '-W', metavar='TIMEOUT', type=float, default=1, help="Time to wait for a response, in seconds")
-    parser.add_argument('--flood', '-f', action='store_true', help="Wait INTERVAL seconds between sending each packet")
-    parser.add_argument('--audible', '-a', action='store_true', help="Audible ping")
-    args = parser.parse_args()
-    
-    interval = args.interval if args.interval is not None else 0.005 if args.flood else 1
-    addresses = await resolve_addresses(args.hostname)
+async def ping_pretty(hostnames: List[str], count: Optional[int] = None, interval: Optional[float] = None, timeout: float = 1, audible: bool = False, flood: bool = False, verbose: bool = True, show_ips: bool = False):
+    from aionettools.ping_progress import PingProgressBar
 
-    ping_count = 0
-    pongs = []
-    try:
-        async with Ping() as ping:
-            def pong_callback(future: Future[PingResponse]):
-                result = future.result()
+    host_addr = dict(zip(hostnames, await asyncio.gather(*map(resolve_addresses, hostnames))))
+    if show_ips:
+        for host, addresses in host_addr.items():
+            print(f"{host}: {', '.join(map(str, addresses))}")
+    host_addr_iterator = more_itertools.interleave(
+        *[
+            zip(itertools.repeat(hostname), itertools.cycle(addresses))
+            for hostname, addresses in host_addr.items()
+        ]
+    )
 
-                if result.status == PingResponse.Status.SUCESS:
-                    pongs.append(result.elapsed)
-                    if args.audible:
+    if count is not None:
+        count = max(count, len(hostnames))
+    if interval is None:
+        interval = 0.005 if flood else .25
+
+    with PingProgressBar(redirect_stdout=True) as bar:
+        sent = 0
+        received = []
+        update_rate = .1
+        last_update = timer() - update_rate
+
+        def update_progress(force=False):
+            nonlocal last_update
+            pending = count - sent if count is not None else None
+            now = timer()
+            if force or (not flood and timer() - last_update > update_rate):
+                bar.update_pings(sent, received, pending)
+                last_update = now
+
+        try:
+            async with Ping() as ping:
+                def callback(future):
+                    result = future.result()
+
+                    if audible:
                         print("\a", end="", flush=True)
-                    if args.flood:
+                    if flood:
                         print("\b \b", end="", flush=True)
+                    elif verbose:
+                        print(f"{result.hostname} ({result.addr}): icmp_seq={result.seq}, time={result.elapsed * 1000:.1f} ms, {result.status.name}")
 
-                if not args.flood:
-                    print(f"{result.hostname} ({result.addr}): icmp_seq={result.seq}, time={result.elapsed * 1000:.1f} ms, {result.status.name}")
+                    received.append(result)
+                    update_progress()
 
-            while args.count is None or ping_count < args.count:
-                if ping_count > 0:
-                    await asyncio.sleep(interval)
-                ping_count += 1
-                if args.flood:
-                    print(".", end="", flush=True)
+                while count is None or sent < count:
+                    if sent > 0:
+                        await asyncio.sleep(interval)
+                    sent += 1
 
-                addresses = addresses[1:] + addresses[:1]
-                addr = addresses[0]
-                pong = ping.ping(addr, timeout=args.timeout, hostname=args.hostname)
-                pong.add_done_callback(pong_callback)
+                    update_progress()
+                    hostname, addr = next(host_addr_iterator)
+                    ping.ping(addr, timeout, hostname=hostname).add_done_callback(callback)
+                    if flood:
+                        print(".", end="", flush=True)
 
-            await ping.wait_pending()
-    finally:
-        if ping_count > 0:
-            success_rate = len(pongs) / ping_count
-            if pongs:
-                time_mean = statistics.mean(pongs)
-                time_stderr = statistics.stdev(pongs)
-                latency = f"{1000 * time_mean :.1f} ± {1000 * time_stderr :.1f} ms"
-            else:
-                latency = "N/A"
-            if args.flood:
-                print()
-            print(f"Success Rate: {100 * success_rate : .2f} %, latency={latency}")
+                await ping.wait_pending()
 
+        finally:
+            update_progress(force=True)
 
-if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        ...
+def create_subcommand(parser: argparse.ArgumentParser, subparsers: argparse._SubParsersAction):
+    async def cmd(args):
+        if args.speedtest:
+            from aiotestspeed.aio import Speedtest
+            speedtest: Speedtest = await Speedtest(secure=True)
+            args.hostnames = [
+                host["host"].split(":")[0]
+                for host in await speedtest.get_closest_servers(10)
+            ]
+
+        await ping_pretty(args.hostnames, count=args.count, interval=args.interval, timeout=args.timeout, audible=args.audible, flood=args.flood, verbose=not args.quiet, show_ips=args.show_ip)
+
+    cmd_parser = subparsers.add_parser(
+        'ping',
+        description='Uses ICMP echo to test latency and loss to a given host',
+    )
+    cmd_parser.set_defaults(cmd=cmd)
+
+    cmd_parser.add_argument('hostnames', metavar='HOST', nargs='*', default=["example.com"], help="Host to ping")
+    cmd_parser.add_argument('--count', '-c', metavar='COUNT', type=int, default=None, help="Stop after sending COUNT ECHO_REQUEST packets")
+    cmd_parser.add_argument('--interval', '-i', metavar='INTERVAL', type=float, default=None, help="Wait INTERVAL seconds between sending each packet")
+    cmd_parser.add_argument('--timeout', '-W', metavar='TIMEOUT', type=float, default=1, help="Time to wait for a response, in seconds")
+    cmd_parser.add_argument('--flood', '-f', action='store_true', help="Wait INTERVAL seconds between sending each packet")
+    cmd_parser.add_argument('--audible', '-a', action='store_true', help="Audible ping")
+    cmd_parser.add_argument('--quiet', '-q', action='store_true', help="Do not show results of each ping")
+    cmd_parser.add_argument('--speedtest', action='store_true', help="Ping servers from SpeedTest by Ookla")
+    cmd_parser.add_argument('--show-ip', action='store_true', help="Shows the resolved IP addresses")
