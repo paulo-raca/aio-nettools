@@ -1,7 +1,10 @@
 from typing import Optional
+
+from progressbar import FileTransferSpeed, GranularBar, ProgressBar, Timer
+
 from aionettools.ndt7 import Direction
 from aionettools.ndt7_adaptive import AdaptiveMeasurement
-from progressbar import FileTransferSpeed, GranularBar, ProgressBar, Timer
+
 
 class TransferSpeedMeasurementMixin:
     def __init__(self, window_duration: Optional[float] = None, *args, **kwargs):
@@ -19,11 +22,11 @@ class TransferSpeedMeasurementMixin:
         self.cached_speed = rate["BytesSent"] if rate is not None else self.cached_speed
         return self.cached_speed
 
+
 class CustomTransferSpeedWidget(FileTransferSpeed, TransferSpeedMeasurementMixin):
     def __init__(self, **kwargs):
         TransferSpeedMeasurementMixin.__init__(self, **kwargs)
         FileTransferSpeed.__init__(self, **kwargs)
-        
 
     def __call__(self, progress, data):
         speed = self.calculate_speed(data)
@@ -31,32 +34,37 @@ class CustomTransferSpeedWidget(FileTransferSpeed, TransferSpeedMeasurementMixin
             speed *= 8
         return FileTransferSpeed.__call__(self, progress, data, speed, 1)
 
+
 class CustomTransferSpeedBarWidget(GranularBar, TransferSpeedMeasurementMixin):
     def __init__(self, reference_speed: float = 100e6, **kwargs):
         TransferSpeedMeasurementMixin.__init__(self, **kwargs)
         GranularBar.__init__(self, **kwargs)
         self.reference_speed = reference_speed
-        
 
     def __call__(self, progress, data, width):
         speed = self.calculate_speed(data) * 8
         data = dict(data)
-        normalized_value = 1 - 2**(-speed / self.reference_speed)
+        normalized_value = 1 - 2 ** (-speed / self.reference_speed)
         old_value = progress.value
         progress.value = normalized_value * progress.max_value
         ret = super().__call__(progress, data, width)
         progress.value = old_value
         return ret
 
+
 class TransferSpeedBar(ProgressBar):
     def __init__(self, direction: Direction) -> None:
-        widgets=[
-            '[', Timer(format="{elapsed}", new_style=True), '] ',
+        widgets = [
+            "[",
+            Timer(format="{elapsed}", new_style=True),
+            "] ",
             f"{direction.name.capitalize()} | current: ",
             CustomTransferSpeedWidget(unit="b", window_duration=1),
             ", average: ",
             CustomTransferSpeedWidget(unit="b", window_duration=None),
             " ",
-            CustomTransferSpeedBarWidget()
+            CustomTransferSpeedBarWidget(),
         ]
-        super().__init__(widgets=widgets, max_value=1000, variables={"measurement": AdaptiveMeasurement.INITIAL_MEASUREMENT})
+        super().__init__(
+            widgets=widgets, max_value=1000, variables={"measurement": AdaptiveMeasurement.INITIAL_MEASUREMENT}
+        )

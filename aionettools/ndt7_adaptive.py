@@ -1,8 +1,11 @@
 from collections import defaultdict
 from typing import Any, Mapping, Optional
+
 from aionettools.util import timer
 
+
 Measurement = Mapping[str, Any]
+
 
 class AdaptiveMeasurement:
     INITIAL_MEASUREMENT = {
@@ -18,8 +21,8 @@ class AdaptiveMeasurement:
             "BytesRetrans": 0,
             "ElapsedTime": 0,
             "RWndLimited": 0,
-            "SndBufLimited": 0
-        }
+            "SndBufLimited": 0,
+        },
     }
 
     def __init__(self, window_duration: Optional[float] = None) -> None:
@@ -50,7 +53,7 @@ class AdaptiveMeasurement:
         else:
             while len(group) >= 3 and self.time_difference(group[1], group[-1]) >= self.window_duration:
                 group.pop(0)
-        
+
         before = group[0] if len(group) > 1 else AdaptiveMeasurement.INITIAL_MEASUREMENT
         after = measurement
         if "AppInfo" in before and "AppInfo" in after:
@@ -60,13 +63,10 @@ class AdaptiveMeasurement:
             }
             elapsedTimeSeconds = after["AppInfo"]["Delta"]["ElapsedTime"] * 1e-6
             if elapsedTimeSeconds > 0.01:
-                after["AppInfo"]["Rate"] = {
-                    "NumBytes": after["AppInfo"]["Delta"]["NumBytes"] / elapsedTimeSeconds
-                }
+                after["AppInfo"]["Rate"] = {"NumBytes": after["AppInfo"]["Delta"]["NumBytes"] / elapsedTimeSeconds}
 
         if "TCPInfo" in before and "TCPInfo" in after:
             after["TCPInfo"]["Delta"] = {
-                "ElapsedTime": after["TCPInfo"]["ElapsedTime"] - before["TCPInfo"]["ElapsedTime"],
                 "BusyTime": after["TCPInfo"]["BusyTime"] - before["TCPInfo"]["BusyTime"],
                 "BytesAcked": after["TCPInfo"]["BytesAcked"] - before["TCPInfo"]["BytesAcked"],
                 "BytesReceived": after["TCPInfo"]["BytesReceived"] - before["TCPInfo"]["BytesReceived"],
@@ -74,7 +74,7 @@ class AdaptiveMeasurement:
                 "BytesRetrans": after["TCPInfo"]["BytesRetrans"] - before["TCPInfo"]["BytesRetrans"],
                 "ElapsedTime": after["TCPInfo"]["ElapsedTime"] - before["TCPInfo"]["ElapsedTime"],
                 "RWndLimited": after["TCPInfo"]["RWndLimited"] - before["TCPInfo"]["RWndLimited"],
-                "SndBufLimited": after["TCPInfo"]["SndBufLimited"] - before["TCPInfo"]["SndBufLimited"]
+                "SndBufLimited": after["TCPInfo"]["SndBufLimited"] - before["TCPInfo"]["SndBufLimited"],
             }
             elapsedTimeSeconds = after["TCPInfo"]["Delta"]["ElapsedTime"] * 1e-6
             if elapsedTimeSeconds > 0.01:
@@ -86,7 +86,7 @@ class AdaptiveMeasurement:
                     "BytesRetrans": after["TCPInfo"]["Delta"]["BytesRetrans"] / elapsedTimeSeconds,
                     "ElapsedTime": after["TCPInfo"]["Delta"]["ElapsedTime"] / elapsedTimeSeconds,
                     "RWndLimited": after["TCPInfo"]["Delta"]["RWndLimited"] / elapsedTimeSeconds,
-                    "SndBufLimited": after["TCPInfo"]["Delta"]["SndBufLimited"] / elapsedTimeSeconds
+                    "SndBufLimited": after["TCPInfo"]["Delta"]["SndBufLimited"] / elapsedTimeSeconds,
                 }
 
         return measurement

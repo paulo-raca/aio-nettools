@@ -1,27 +1,31 @@
 import statistics
 from typing import List
-from aionettools.ping import PingResult
+
 from progressbar import FormatLabel, MultiRangeBar, ProgressBar, Timer
 from termcolor import colored
+
+from aionettools.ping import PingResult
+
 
 class PingProgressBar(ProgressBar):
     def __init__(self, **kwargs) -> None:
         markers = [
-            colored('!', 'red', attrs=['bold']),  # Lost
-            colored('●', 'green'),  # Pongs
-            colored('·', 'yellow'),  # Sent
-            ' ',  # Pending
+            colored("!", "red", attrs=["bold"]),  # Lost
+            colored("●", "green"),  # Pongs
+            colored("·", "yellow"),  # Sent
+            " ",  # Pending
         ]
         widgets = [
-            '[', Timer(format="{elapsed}", new_style=True), '] ',
-            f"Ping | ",
+            "[",
+            Timer(format="{elapsed}", new_style=True),
+            "] Ping | ",
             FormatLabel("{variables.progress}, Time: {variables.latency}, Loss: {variables.loss} ", new_style=True),
             MultiRangeBar("status", markers=markers),
         ]
         super().__init__(widgets=widgets, variables={"latency": "N/A", "loss": 0, "progress": "0"}, **kwargs)
 
     def update_pings(self, sent: int, received: List[PingResult], pending: int = 0, **kwargs):
-        #print(f"sent={sent}, received={received}, pending={pending}")
+        # print(f"sent={sent}, received={received}, pending={pending}")
         pongs = 0
         lost = 0
         latencies = []

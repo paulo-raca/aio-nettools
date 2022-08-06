@@ -1,21 +1,22 @@
-from dataclasses import dataclass, field
-import argparse
-from enum import Enum, auto
-from ipaddress import _BaseAddress, IPv4Address, IPv6Address
+import asyncio
 import itertools
-import more_itertools
 import random
 import socket
-import asyncio
-import statistics
 import struct
-from typing import Any, List, Mapping, Optional, Tuple
 from asyncio import Future
-from timeit import default_timer as timer
+from dataclasses import dataclass, field
+from enum import Enum, auto
+from ipaddress import IPv4Address, IPv6Address, _BaseAddress
 from socket import AddressFamily
+from timeit import default_timer as timer
+from typing import Iterable, List, Mapping, Optional, Tuple
+
+import more_itertools
+import typer
 from typing_extensions import Self
 
-from .util import resolve_addresses
+from .util import async_main, autocomplete, resolve_addresses
+
 
 @dataclass
 class PingResult:
@@ -50,6 +51,7 @@ class PingResult:
             self.end = timer()
             self._future.set_result(self)
 
+
 class Ping:
     ICMP_ECHO_REQUEST = 8
     ICMP_ECHO_REPLY = 0
@@ -63,13 +65,16 @@ class Ping:
         self.sockets: Mapping[AddressFamily, socket.socket] = {}
         self.pending_sends: Mapping[AddressFamily, List[Tuple[bytes, _BaseAddress]]] = {}
 
-        for family, protocol in [(AddressFamily.AF_INET, socket.getprotobyname("icmp")), (AddressFamily.AF_INET6, socket.getprotobyname("ipv6-icmp"))]:
+        for family, protocol in [
+            (AddressFamily.AF_INET, socket.getprotobyname("icmp")),
+            (AddressFamily.AF_INET6, socket.getprotobyname("ipv6-icmp")),
+        ]:
             sock = socket.socket(family, socket.SOCK_DGRAM, protocol)
             self.sockets[family] = sock
             self.pending_sends[family] = []
             sock.setblocking(False)
             self.loop.add_reader(sock.fileno(), self.recv_ready, sock)
-    
+
     async def __aenter__(self):
         return self
 
@@ -93,15 +98,15 @@ class Ping:
             id, seq = struct.unpack("!HH", remaining[:4])
             remaining = remaining[4:]
             payload = remaining
-            #print(f"id={id}, seq={seq}, payload={payload}")
+            # print(f"id={id}, seq={seq}, payload={payload}")
             key = (seq, payload)
             pending_ping = self.pending_pings.get(key)
             if pending_ping and pending_ping.payload == payload:
                 pending_ping.complete(PingResult.Status.SUCESS)
         else:
-            #print(f"Discarding unexpected ICMP package: addr={addr}, type={type}, code={code}, remaining={remaining}")
+            # Discarding unexpected ICMP package
             pass
-        
+
     def send_ready(self, family: AddressFamily):
         queue = self.pending_sends[family]
         sock = self.sockets[family]
@@ -110,7 +115,7 @@ class Ping:
             sock.sendto(data, (address.compressed, 0))
         if len(queue) == 0:
             self.loop.remove_writer(sock.fileno())
-        
+
     def ping(self, addr: _BaseAddress, timeout: Optional[float] = 1, **kwargs):
         seq = self.echo_seq
         self.echo_seq = (self.echo_seq + 1) & 0xFFFF
@@ -123,18 +128,18 @@ class Ping:
             icmp_type = Ping.ICMP6_ECHO_REQUEST
         else:
             raise ValueError("Unexpected address type: {addr} -- Should be IPv4Address or IPv6Address")
-        
+
         header = struct.pack(
-            "!BBHHH", 
-            icmp_type, # ICMP Type: ECHO_REQUEST
-            0, # ICMP Code: always zero for ping
-            0, # Checksum -- Populated later by the linux kernel
-            0, # Identifier -- Populated later by the linux kernel
-            seq, # Sequence number
+            "!BBHHH",
+            icmp_type,  # ICMP Type: ECHO_REQUEST
+            0,  # ICMP Code: always zero for ping
+            0,  # Checksum -- Populated later by the linux kernel
+            0,  # Identifier -- Populated later by the linux kernel
+            seq,  # Sequence number
         )
         payload = bytes([random.getrandbits(8) for i in range(10)])
         packet = header + payload
-        
+
         pending_ping = PingResult(addr=addr, seq=seq, payload=payload)
         for key, value in kwargs.items():
             if hasattr(pending_ping, key):
@@ -151,8 +156,10 @@ class Ping:
         ret.add_done_callback(lambda _: self.pending_pings.pop(pending_ping.key))
         if timeout is not None:
             loop = asyncio.get_event_loop()
+
             def on_timeout():
                 pending_ping.complete(PingResult.Status.TIMEOUT)
+
             timeout_handle = loop.call_later(timeout, on_timeout)
             ret.add_done_callback(lambda _: timeout_handle.cancel())
         return ret
@@ -160,29 +167,37 @@ class Ping:
     async def wait_pending(self):
         await asyncio.gather(*[pending._future for pending in self.pending_pings.values()], return_exceptions=True)
 
-async def ping_pretty(hostnames: List[str], count: Optional[int] = None, interval: Optional[float] = None, timeout: float = 1, audible: bool = False, flood: bool = False, verbose: bool = True, show_ips: bool = False):
+
+async def ping_pretty(
+    hostnames: Iterable[str],
+    count: Optional[int] = None,
+    interval: Optional[float] = None,
+    timeout: float = 1,
+    audible: bool = False,
+    flood: bool = False,
+    verbose: bool = True,
+    show_ips: bool = False,
+):
     from aionettools.ping_progress import PingProgressBar
 
+    hostnames = set(hostnames)
     host_addr = dict(zip(hostnames, await asyncio.gather(*map(resolve_addresses, hostnames))))
     if show_ips:
         for host, addresses in host_addr.items():
-            print(f"{host}: {', '.join(map(str, addresses))}")
+            print(f"Resolved {host}: {', '.join(map(str, addresses))}")
     host_addr_iterator = more_itertools.interleave(
-        *[
-            zip(itertools.repeat(hostname), itertools.cycle(addresses))
-            for hostname, addresses in host_addr.items()
-        ]
+        *[zip(itertools.repeat(hostname), itertools.cycle(addresses)) for hostname, addresses in host_addr.items()]
     )
 
     if count is not None:
         count = max(count, len(hostnames))
     if interval is None:
-        interval = 0.005 if flood else .25
+        interval = 0.005 if flood else 0.25
 
     with PingProgressBar(redirect_stdout=True) as bar:
         sent = 0
         received = []
-        update_rate = .1
+        update_rate = 0.1
         last_update = timer() - update_rate
 
         def update_progress(force=False):
@@ -195,6 +210,7 @@ async def ping_pretty(hostnames: List[str], count: Optional[int] = None, interva
 
         try:
             async with Ping() as ping:
+
                 def callback(future):
                     result = future.result()
 
@@ -202,8 +218,10 @@ async def ping_pretty(hostnames: List[str], count: Optional[int] = None, interva
                         print("\a", end="", flush=True)
                     if flood:
                         print("\b \b", end="", flush=True)
-                    elif verbose:
-                        print(f"{result.hostname} ({result.addr}): icmp_seq={result.seq}, time={result.elapsed * 1000:.1f} ms, {result.status.name}")
+                    if verbose and not flood:
+                        print(
+                            f"{result.hostname} ({result.addr}): icmp_seq={result.seq}, time={result.elapsed * 1000:.1f} ms, {result.status.name}"
+                        )
 
                     received.append(result)
                     update_progress()
@@ -224,6 +242,57 @@ async def ping_pretty(hostnames: List[str], count: Optional[int] = None, interva
         finally:
             update_progress(force=True)
 
+
+def setup_cli(app: typer.Typer):
+    default_hostnames = [
+        "localhost",
+        "example.com",
+        "facebook.com",
+        "amazon.com",
+        "apple.com",
+        "netflix.com",
+        "google.com",
+    ]
+    @app.command()
+    @async_main
+    async def ping(
+        hostnames: List[str] = typer.Argument(..., metavar="HOST", help="Host to ping", autocompletion=autocomplete(default_hostnames)),
+        count: Optional[int] = typer.Option(
+            None, "--count", "-c", show_default=False, help="Stop after sending COUNT ECHO_REQUEST packets"
+        ),
+        interval: Optional[float] = typer.Option(
+            None, "--interval", "-i", help="Wait INTERVAL seconds between sending each packet"
+        ),
+        timeout: float = typer.Option(1, "--timeout", "-W", help="Time to wait for a response, in seconds"),
+        flood: bool = typer.Option(
+            False,
+            "--flood",
+            "-f",
+            help="Flood *ping*. For _every_ ECHO_REQUEST sent a period “.” is printed, while for every ECHO_REPLY received a backspace is printed",
+        ),
+        audible: bool = typer.Option(False, "--audible", "-a", help="Audible ping"),
+        quiet: bool = typer.Option(False, "--quiet", "-q", help="Do not show results of each ping"),
+        show_ips: bool = typer.Option(False, "--show-ips", help="Shows the resolved IP addresses"),
+        speedtest: bool = typer.Option(False, "--speedtest", help="Ping servers from SpeedTest by Ookla"),
+    ):
+        if speedtest:
+            from aiotestspeed.aio import Speedtest
+
+            speedtest = await Speedtest(secure=True)
+            hostnames = [host["host"].split(":")[0] for host in await speedtest.get_closest_servers(10)]
+        await ping_pretty(
+            hostnames,
+            count=count,
+            interval=interval,
+            timeout=timeout,
+            audible=audible,
+            flood=flood,
+            verbose=not quiet,
+            show_ips=show_ips,
+        )
+
+
+"""
 def create_subcommand(parser: argparse.ArgumentParser, subparsers: argparse._SubParsersAction):
     async def cmd(args):
         if args.speedtest:
@@ -251,3 +320,4 @@ def create_subcommand(parser: argparse.ArgumentParser, subparsers: argparse._Sub
     cmd_parser.add_argument('--quiet', '-q', action='store_true', help="Do not show results of each ping")
     cmd_parser.add_argument('--speedtest', action='store_true', help="Ping servers from SpeedTest by Ookla")
     cmd_parser.add_argument('--show-ip', action='store_true', help="Shows the resolved IP addresses")
+"""

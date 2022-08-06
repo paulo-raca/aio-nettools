@@ -1,8 +1,13 @@
 [tool.poetry]
-name = "aio-nettools"
+name = "aionettools"
 version = "0.1.0"
 description = "Network utilities for Python using asyncio"
 authors = ["Paulo Costa <me@paulo.costa.nom.br>"]
+packages = [
+    { include = "aionettools" },
+]
+[tool.poetry.scripts]
+aionetttools = 'aionettools.main:app'
 
 [tool.poetry.dependencies]
 python = "^3.10"
@@ -16,9 +21,26 @@ tcpinfo = "^0.2.2"
 progressbar2 = "^4.0.0"
 more-itertools = "^8.13.0"
 termcolor = "^1.1.0"
+typer = {extras = ["all"], version = "^0.6.1"}
 
 [tool.poetry.dev-dependencies]
+pytest = "^7.1.1"
+mypy = "^0.961"
+pre-commit = "^2.20.0"
 
 [build-system]
 requires = ["poetry-core>=1.0.0"]
 build-backend = "poetry.core.masonry.api"
+
+[tool.black]
+line-length = 119
+
+[tool.isort]
+src_paths = ["aionettools", "tests"]
+profile = "black"
+indent = 4
+combine_star = true
+combine_as_imports = true
+lines_after_imports = 2
+known_first_party = ["aionettools"]
+sections = ["FUTURE", "STDLIB", "THIRDPARTY", "FIRSTPARTY", "LOCALFOLDER"]
