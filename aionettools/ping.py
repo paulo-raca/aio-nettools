@@ -15,7 +15,7 @@ import more_itertools
 import typer
 from typing_extensions import Self
 
-from .util import async_main, autocomplete, resolve_addresses
+from .util import async_command, autocomplete, resolve_addresses, test_hostnames
 
 
 @dataclass
@@ -243,81 +243,43 @@ async def ping_pretty(
             update_progress(force=True)
 
 
-def setup_cli(app: typer.Typer):
-    default_hostnames = [
-        "localhost",
-        "example.com",
-        "facebook.com",
-        "amazon.com",
-        "apple.com",
-        "netflix.com",
-        "google.com",
-    ]
-    @app.command()
-    @async_main
-    async def ping(
-        hostnames: List[str] = typer.Argument(..., metavar="HOST", help="Host to ping", autocompletion=autocomplete(default_hostnames)),
-        count: Optional[int] = typer.Option(
-            None, "--count", "-c", show_default=False, help="Stop after sending COUNT ECHO_REQUEST packets"
-        ),
-        interval: Optional[float] = typer.Option(
-            None, "--interval", "-i", help="Wait INTERVAL seconds between sending each packet"
-        ),
-        timeout: float = typer.Option(1, "--timeout", "-W", help="Time to wait for a response, in seconds"),
-        flood: bool = typer.Option(
-            False,
-            "--flood",
-            "-f",
-            help="Flood *ping*. For _every_ ECHO_REQUEST sent a period “.” is printed, while for every ECHO_REPLY received a backspace is printed",
-        ),
-        audible: bool = typer.Option(False, "--audible", "-a", help="Audible ping"),
-        quiet: bool = typer.Option(False, "--quiet", "-q", help="Do not show results of each ping"),
-        show_ips: bool = typer.Option(False, "--show-ips", help="Shows the resolved IP addresses"),
-        speedtest: bool = typer.Option(False, "--speedtest", help="Ping servers from SpeedTest by Ookla"),
-    ):
-        if speedtest:
-            from aiotestspeed.aio import Speedtest
-
-            speedtest = await Speedtest(secure=True)
-            hostnames = [host["host"].split(":")[0] for host in await speedtest.get_closest_servers(10)]
-        await ping_pretty(
-            hostnames,
-            count=count,
-            interval=interval,
-            timeout=timeout,
-            audible=audible,
-            flood=flood,
-            verbose=not quiet,
-            show_ips=show_ips,
-        )
 
 
-"""
-def create_subcommand(parser: argparse.ArgumentParser, subparsers: argparse._SubParsersAction):
-    async def cmd(args):
-        if args.speedtest:
-            from aiotestspeed.aio import Speedtest
-            speedtest: Speedtest = await Speedtest(secure=True)
-            args.hostnames = [
-                host["host"].split(":")[0]
-                for host in await speedtest.get_closest_servers(10)
-            ]
+@async_command
+async def ping_main(
+    hostnames: List[str] = typer.Argument(
+        ..., metavar="HOST", help="Host to ping", autocompletion=autocomplete(test_hostnames + ["speedtest"], name="hostnames", fast=True)
+    ),
+    count: Optional[int] = typer.Option(
+        None, "--count", "-c", show_default=False, help="Stop after sending COUNT ECHO_REQUEST packets"
+    ),
+    interval: Optional[float] = typer.Option(
+        None, "--interval", "-i", help="Wait INTERVAL seconds between sending each packet"
+    ),
+    timeout: float = typer.Option(1, "--timeout", "-W", help="Time to wait for a response, in seconds"),
+    flood: bool = typer.Option(
+        False,
+        "--flood",
+        "-f",
+        help="Flood *ping*. For _every_ ECHO_REQUEST sent a period “.” is printed, while for every ECHO_REPLY received a backspace is printed",
+    ),
+    audible: bool = typer.Option(False, "--audible", "-a", help="Audible ping"),
+    quiet: bool = typer.Option(False, "--quiet", "-q", help="Do not show results of each ping"),
+    show_ips: bool = typer.Option(False, "--show-ips", help="Shows the resolved IP addresses"),
+):
+    if "speedtest" in hostnames:
+        hostnames.remove("speedtest")
+        from aiotestspeed.aio import Speedtest
 
-        await ping_pretty(args.hostnames, count=args.count, interval=args.interval, timeout=args.timeout, audible=args.audible, flood=args.flood, verbose=not args.quiet, show_ips=args.show_ip)
-
-    cmd_parser = subparsers.add_parser(
-        'ping',
-        description='Uses ICMP echo to test latency and loss to a given host',
+        speedtest = await Speedtest(secure=True)
+        hostnames += [host["host"].split(":")[0] for host in await speedtest.get_closest_servers(10)]
+    await ping_pretty(
+        hostnames,
+        count=count,
+        interval=interval,
+        timeout=timeout,
+        audible=audible,
+        flood=flood,
+        verbose=not quiet,
+        show_ips=show_ips,
     )
-    cmd_parser.set_defaults(cmd=cmd)
-
-    cmd_parser.add_argument('hostnames', metavar='HOST', nargs='*', default=["example.com"], help="Host to ping")
-    cmd_parser.add_argument('--count', '-c', metavar='COUNT', type=int, default=None, help="Stop after sending COUNT ECHO_REQUEST packets")
-    cmd_parser.add_argument('--interval', '-i', metavar='INTERVAL', type=float, default=None, help="Wait INTERVAL seconds between sending each packet")
-    cmd_parser.add_argument('--timeout', '-W', metavar='TIMEOUT', type=float, default=1, help="Time to wait for a response, in seconds")
-    cmd_parser.add_argument('--flood', '-f', action='store_true', help="Wait INTERVAL seconds between sending each packet")
-    cmd_parser.add_argument('--audible', '-a', action='store_true', help="Audible ping")
-    cmd_parser.add_argument('--quiet', '-q', action='store_true', help="Do not show results of each ping")
-    cmd_parser.add_argument('--speedtest', action='store_true', help="Ping servers from SpeedTest by Ookla")
-    cmd_parser.add_argument('--show-ip', action='store_true', help="Shows the resolved IP addresses")
-"""

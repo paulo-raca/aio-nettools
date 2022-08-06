@@ -14,7 +14,12 @@ from typing_extensions import Self
 
 from aionettools.ping import ping_pretty
 from aionettools.tcpinfo import get_tcpinfo
-from aionettools.util import async_main, format_ip_port, get_sock_from_websocket, timer
+from aionettools.util import (
+    async_command,
+    format_ip_port,
+    get_sock_from_websocket,
+    timer,
+)
 
 
 class Direction(Enum):
@@ -187,13 +192,10 @@ class NDT7:
                     if measurement_direction == direction:
                         bar.update(measurement=measurement_data)
 
-
-def setup_cli(app: typer.Typer):
-    @app.command()
-    @async_main
-    async def ndt7():
-        server = await NDT7.get_nearest_server()
-        print(f"Using {server.machine}")
-        await ping_pretty([server.machine], count=100, interval=0.05, verbose=False)
-        await server.test_pretty(Direction.download)
-        await server.test_pretty(Direction.upload)
+@async_command
+async def ndt7_main():
+    server = await NDT7.get_nearest_server()
+    print(f"Using {server.machine}")
+    await ping_pretty([server.machine], count=100, interval=0.05, verbose=False)
+    await server.test_pretty(Direction.download)
+    await server.test_pretty(Direction.upload)

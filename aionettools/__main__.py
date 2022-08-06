@@ -1,3 +1,3 @@
-from aionettools.main import app
+from aionettools.main import main
 
 app()

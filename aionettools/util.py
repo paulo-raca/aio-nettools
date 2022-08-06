@@ -2,17 +2,25 @@ import asyncio
 import socket
 from functools import wraps
 from ipaddress import IPv4Address, _BaseAddress, ip_address
-import sys
-from textwrap import wrap
 from time import perf_counter
-import typer
-import click
-from typing import Any, Iterable, List, Sequence, Tuple
+from typing import Any, Iterable, List, Tuple
 
+import typer
 from websockets import WebSocketCommonProtocol
+
+test_hostnames = [
+    "localhost",
+    "example.com",
+    "facebook.com",
+    "amazon.com",
+    "apple.com",
+    "netflix.com",
+    "google.com",
+]
 
 def timer():
     return perf_counter()
+
 
 async def resolve_addresses(hostname: str) -> List[_BaseAddress]:
     loop = asyncio.get_event_loop()
@@ -50,7 +58,7 @@ def get_sock_from_websocket(websocket: WebSocketCommonProtocol) -> socket.socket
     return None
 
 
-def async_main(f):
+def async_command(f):
     @wraps(f)
     def wrapper(*args, **kwargs):
         try:
@@ -60,10 +68,14 @@ def async_main(f):
 
     return wrapper
 
-def autocomplete(values: Iterable[str]):
+
+def autocomplete(values: Iterable[str], name: str = "", fast: bool = False):
     def wrapped(ctx: typer.Context, args: List[str], incomplete: str):
-        used = []
-        for name in values:
-            if name.startswith(incomplete) and name not in used:
-                yield name
+        used = ctx.params.get(name) or []
+        for value in values:
+            if value.startswith(incomplete) and value not in used:
+                yield value
+                if fast and incomplete == "":
+                    break
+
     return wrapped

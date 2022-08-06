@@ -7,7 +7,9 @@ packages = [
     { include = "aionettools" },
 ]
 [tool.poetry.scripts]
-aionetttools = 'aionettools.main:app'
+aionetttools = 'aionettools.main:main'
+aioping = 'aionettools.main:ping'
+aiondt7 = 'aionettools.main:ndt7'
 
 [tool.poetry.dependencies]
 python = "^3.10"
