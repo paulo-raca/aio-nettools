@@ -415,6 +415,14 @@ optional = false
 python-versions = ">=3.5"
 
 [[package]]
+name = "sortedcontainers"
+version = "2.4.0"
+description = "Sorted Containers -- Sorted List, Sorted Dict, Sorted Set"
+category = "main"
+optional = false
+python-versions = "*"
+
+[[package]]
 name = "speedtest"
 version = "0.0.1"
 description = "Speedtest"
@@ -510,7 +518,7 @@ python-versions = ">=3.7"
 [metadata]
 lock-version = "1.1"
 python-versions = "^3.10"
-content-hash = "c27a8acf0fe4be20f005e3e9705da1b5fca54b958f8d566f0cfba4ae7e56bd80"
+content-hash = "d669c16769ac78969020d79bfb64220b299fd8273bb3ddbc29bab8361bfe5ff6"
 
 [metadata.files]
 aiotestspeed = []
@@ -674,6 +682,7 @@ sniffio = [
     {file = "sniffio-1.2.0-py3-none-any.whl", hash = "sha256:471b71698eac1c2112a40ce2752bb2f4a4814c22a54a3eed3676bc0f5ca9f663"},
     {file = "sniffio-1.2.0.tar.gz", hash = "sha256:c4666eecec1d3f50960c6bdf61ab7bc350648da6c126e3cf6898d8cd4ddcd3de"},
 ]
+sortedcontainers = []
 speedtest = []
 tcpinfo = []
 termcolor = []

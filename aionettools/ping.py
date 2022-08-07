@@ -21,11 +21,12 @@ from .util import async_command, autocomplete, resolve_addresses, test_hostnames
 @dataclass
 class PingResult:
     class Status(Enum):
-        PENDING = auto()
-        SUCESS = auto()
-        TIMEOUT = auto()
-        CANCELED = auto()
-        UNREACHABLE = auto()
+        SCHEDULED = auto()    # Not sent yet
+        PENDING = auto()      # Ping sent
+        SUCESS = auto()       # Pong received
+        UNREACHABLE = auto()  # Received a Network Unreachable response
+        TIMEOUT = auto()      # No response received before reaching the timeout
+        CANCELED = auto()     # Aborted before receiving the response
 
     addr: bytes
     seq: int
@@ -63,7 +64,7 @@ class Ping:
         self.loop = asyncio.get_event_loop()
         self.pending_pings: Mapping[int, PingResult] = {}
         self.sockets: Mapping[AddressFamily, socket.socket] = {}
-        self.pending_sends: Mapping[AddressFamily, List[Tuple[bytes, _BaseAddress]]] = {}
+        self.pending_sends: Mapping[AddressFamily, List[Tuple[bytes, _BaseAddress, PingResult]]] = {}
 
         for family, protocol in [
             (AddressFamily.AF_INET, socket.getprotobyname("icmp")),
@@ -111,12 +112,15 @@ class Ping:
         queue = self.pending_sends[family]
         sock = self.sockets[family]
         if len(queue) > 0:
-            data, address = queue.pop(0)
-            sock.sendto(data, (address.compressed, 0))
+            data, address, result = queue.pop(0)
+            try:
+                sock.sendto(data, (address.compressed, 0))
+            except Exception:
+                result.complete(PingResult.Status.UNREACHABLE)
         if len(queue) == 0:
             self.loop.remove_writer(sock.fileno())
 
-    def ping(self, addr: _BaseAddress, timeout: Optional[float] = 1, **kwargs):
+    def ping(self, addr: _BaseAddress, timeout: Optional[float] = 1, **kwargs) -> PingResult:
         seq = self.echo_seq
         self.echo_seq = (self.echo_seq + 1) & 0xFFFF
 
@@ -148,12 +152,11 @@ class Ping:
 
         self.pending_pings[pending_ping.key] = pending_ping
         sock = self.sockets[family]
-        self.pending_sends[family].append((packet, addr))
+        self.pending_sends[family].append((packet, addr, pending_ping))
         if len(self.pending_sends[family]) == 1:
             self.loop.add_writer(sock.fileno(), self.send_ready, family)
 
-        ret = pending_ping._future
-        ret.add_done_callback(lambda _: self.pending_pings.pop(pending_ping.key))
+        pending_ping._future.add_done_callback(lambda _: self.pending_pings.pop(pending_ping.key))
         if timeout is not None:
             loop = asyncio.get_event_loop()
 
@@ -161,16 +164,18 @@ class Ping:
                 pending_ping.complete(PingResult.Status.TIMEOUT)
 
             timeout_handle = loop.call_later(timeout, on_timeout)
-            ret.add_done_callback(lambda _: timeout_handle.cancel())
-        return ret
+            pending_ping._future.add_done_callback(lambda _: timeout_handle.cancel())
+        return pending_ping
 
     async def wait_pending(self):
         await asyncio.gather(*[pending._future for pending in self.pending_pings.values()], return_exceptions=True)
 
 
+
 async def ping_pretty(
     hostnames: Iterable[str],
     count: Optional[int] = None,
+    duration: Optional[float] = None,
     interval: Optional[float] = None,
     timeout: float = 1,
     audible: bool = False,
@@ -189,58 +194,42 @@ async def ping_pretty(
         *[zip(itertools.repeat(hostname), itertools.cycle(addresses)) for hostname, addresses in host_addr.items()]
     )
 
-    if count is not None:
-        count = max(count, len(hostnames))
-    if interval is None:
-        interval = 0.005 if flood else 0.25
+    retention_time = 5*timeout if count is None and duration is None else None
+    print(f"count={count}, timeout={timeout}, retention_time={retention_time}")
 
-    with PingProgressBar(redirect_stdout=True) as bar:
-        sent = 0
-        received = []
-        update_rate = 0.1
-        last_update = timer() - update_rate
+    async with Ping() as ping:
+        with PingProgressBar(hostnames, retention_time=retention_time, count=count or 0) as bar:
 
-        def update_progress(force=False):
-            nonlocal last_update
-            pending = count - sent if count is not None else None
-            now = timer()
-            if force or (not flood and timer() - last_update > update_rate):
-                bar.update_pings(sent, received, pending)
-                last_update = now
+            def callback(future):
+                result = future.result()
+                if audible:
+                    print("\a", end="", flush=True)
+                if flood:
+                    print("\b \b", end="", flush=True)
+                if verbose and not flood:
+                    print(f"{result.hostname} ({result.addr}): icmp_seq={result.seq}, time={result.elapsed * 1000:.1f} ms, {result.status.name}")
 
-        try:
-            async with Ping() as ping:
+            if interval is None:
+                interval = 0.005 if flood else 0.25
+            total_count = count * len(hostnames) if count is not None else None
+            interval /= len(hostnames)
+            total_sent = 0
+            
+            end = timer() + duration if duration is not None else None
+            print(f"end={end}, now={timer()}")
+            while (total_count is None or total_sent < total_count) and (end is None or timer() < end):
+                hostname, addr = next(host_addr_iterator)
+                if total_sent > 0:
+                    await asyncio.sleep(interval)
+                total_sent += 1
 
-                def callback(future):
-                    result = future.result()
+                if flood:
+                    print(".", end="", flush=True)
+                ping_result = ping.ping(addr, timeout, hostname=hostname)
+                ping_result._future.add_done_callback(callback)
+                bar.add_ping(hostname, ping_result)
 
-                    if audible:
-                        print("\a", end="", flush=True)
-                    if flood:
-                        print("\b \b", end="", flush=True)
-                    if verbose and not flood:
-                        print(
-                            f"{result.hostname} ({result.addr}): icmp_seq={result.seq}, time={result.elapsed * 1000:.1f} ms, {result.status.name}"
-                        )
-
-                    received.append(result)
-                    update_progress()
-
-                while count is None or sent < count:
-                    if sent > 0:
-                        await asyncio.sleep(interval)
-                    sent += 1
-
-                    update_progress()
-                    hostname, addr = next(host_addr_iterator)
-                    ping.ping(addr, timeout, hostname=hostname).add_done_callback(callback)
-                    if flood:
-                        print(".", end="", flush=True)
-
-                await ping.wait_pending()
-
-        finally:
-            update_progress(force=True)
+            await ping.wait_pending()
 
 
 
@@ -253,6 +242,7 @@ async def ping_main(
     count: Optional[int] = typer.Option(
         None, "--count", "-c", show_default=False, help="Stop after sending COUNT ECHO_REQUEST packets"
     ),
+    time: Optional[float] = typer.Option(1, "--time", "-T", help="Stop the test after TIME seconds"),
     interval: Optional[float] = typer.Option(
         None, "--interval", "-i", help="Wait INTERVAL seconds between sending each packet"
     ),
@@ -267,6 +257,10 @@ async def ping_main(
     quiet: bool = typer.Option(False, "--quiet", "-q", help="Do not show results of each ping"),
     show_ips: bool = typer.Option(False, "--show-ips", help="Shows the resolved IP addresses"),
 ):
+    if "faang" in hostnames:
+        hostnames.remove("faang")
+        hostnames += ["facebook.com", "apple.com", "amazon.com", "netflix.com", "google.com"]
+
     if "speedtest" in hostnames:
         hostnames.remove("speedtest")
         from aiotestspeed.aio import Speedtest
@@ -276,6 +270,7 @@ async def ping_main(
     await ping_pretty(
         hostnames,
         count=count,
+        duration=time,
         interval=interval,
         timeout=timeout,
         audible=audible,
