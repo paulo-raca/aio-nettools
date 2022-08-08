@@ -216,7 +216,6 @@ async def ping_pretty(
             total_sent = 0
             
             end = timer() + duration if duration is not None else None
-            print(f"end={end}, now={timer()}")
             while (total_count is None or total_sent < total_count) and (end is None or timer() < end):
                 hostname, addr = next(host_addr_iterator)
                 if total_sent > 0:
@@ -242,7 +241,7 @@ async def ping_main(
     count: Optional[int] = typer.Option(
         None, "--count", "-c", show_default=False, help="Stop after sending COUNT ECHO_REQUEST packets"
     ),
-    time: Optional[float] = typer.Option(1, "--time", "-T", help="Stop the test after TIME seconds"),
+    time: Optional[float] = typer.Option(None, "--time", "-T", help="Stop the test after TIME seconds"),
     interval: Optional[float] = typer.Option(
         None, "--interval", "-i", help="Wait INTERVAL seconds between sending each packet"
     ),
