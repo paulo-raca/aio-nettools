@@ -1,13 +1,11 @@
 from collections import defaultdict
-from typing import Any, Mapping, Optional
+from typing import Any, Mapping, Optional, TypedDict
 
 from aionettools.util import timer
+from aionettools.ndt7.ndt7 import Measurement
 
 
-Measurement = Mapping[str, Any]
-
-
-class AdaptiveMeasurement:
+class NDT7Statistics:
     INITIAL_MEASUREMENT = {
         "AppInfo": {
             "ElapsedTime": 0,
@@ -25,8 +23,8 @@ class AdaptiveMeasurement:
         },
     }
 
-    def __init__(self, window_duration: Optional[float] = None) -> None:
-        self.window_duration = window_duration
+    def __init__(self, window: Optional[float] = None) -> None:
+        self.window = window
         self.groups: Mapping[Any, Measurement] = defaultdict(list)
         self.upload_measurements = []
         self.result = None
@@ -41,20 +39,20 @@ class AdaptiveMeasurement:
     def update(self, measurement: Measurement, group: Optional[Any] = None):
         measurement = dict(measurement)
         measurement["timestamp"] = timer()
-        group = self.groups[group]
-        group.append(measurement)
+        group_data = self.groups[group]
+        group_data.append(measurement)
 
-        while len(group) >= 3 and group[0] is AdaptiveMeasurement.INITIAL_MEASUREMENT:
-            group.pop(0)
+        while len(group_data) >= 3 and group_data[0] is NDT7Statistics.INITIAL_MEASUREMENT:
+            group_data.pop(0)
 
-        if self.window_duration is None:
-            while len(group) >= 3:
-                group.pop(1)
+        if self.window is None:
+            while len(group_data) >= 3:
+                group_data.pop(1)
         else:
-            while len(group) >= 3 and self.time_difference(group[1], group[-1]) >= self.window_duration:
-                group.pop(0)
+            while len(group_data) >= 3 and self.time_difference(group_data[1], group_data[-1]) >= self.window:
+                group_data.pop(0)
 
-        before = group[0] if len(group) > 1 else AdaptiveMeasurement.INITIAL_MEASUREMENT
+        before = group_data[0] if len(group_data) > 1 else NDT7Statistics.INITIAL_MEASUREMENT
         after = measurement
         if "AppInfo" in before and "AppInfo" in after:
             after["AppInfo"]["Delta"] = {

@@ -8,19 +8,15 @@ import random
 from yarl import URL
 from asyncio import Queue, Task
 from enum import Enum, auto
-from typing import List, Mapping, Optional
+from typing import AsyncIterable, Callable, List, Mapping, Optional, Tuple, TypedDict
 
 import httpx
-import typer
 import websockets
 import websockets.server
 from websockets.http import Headers
-from typing_extensions import Self
 
-from aionettools.ping import ping_pretty
 from aionettools.tcpinfo import get_tcpinfo
 from aionettools.util import (
-    async_command,
     format_ip_port,
     get_sock_from_websocket,
     timer,
@@ -43,7 +39,45 @@ class Role(Enum):
     client = auto()
     server = auto()
 
+    @property
+    def reversed(self):
+        if self == NDT7.Role.client:
+            return NDT7.Role.server
+        else:
+            return NDT7.Role.client
 
+class AppInfo(TypedDict):
+    ElapsedTime: int  # the time elapsed since the beginning of this test, measured in microseconds.
+    NumBytes: int  # the number of bytes sent (or received) since the beginning of the specific test
+
+
+class ConnectionInfo(TypedDict):
+    Client: str  # The serialization of the client endpoint according to the server
+    Server: str  # The serialization of the server endpoint according to the server
+    UUID: str  # An internal unique identifier for this test within the Measurement Lab (M-Lab) platform
+
+
+class TCPInfo:
+    BusyTime: int  # The number of microseconds spent actively sending data because the write queue of the TCP socket is non-empty.
+    BytesAcked: int  # the number of bytes for which we received acknowledgment. Note that this field, and all other TCPInfo fields, contain the number of bytes measured at TCP/IP level (i.e. including the WebSocket and TLS overhead).
+    BytesReceived: int  # the number of bytes for which we sent acknowledgment.
+    BytesSent: int  # the number of bytes which have been transmitted or retransmitted.
+    BytesRetrans: int  # the number of bytes which have been retransmitted.
+    ElapsedTime: int  # the time elapsed since the beginning of this test, measured in microseconds.
+    MinRTT: int  # The minimum RTT seen by the kernel, measured in microseconds.
+    RTT: int  # The current smoothed RTT value, measured in microseconds.
+    RTTVar: int  # The variance or RTT.
+    RWndLimited: int  # The amount of microseconds spent stalled because there is not enough buffer at the receiver.
+    SndBufLimited: int  # The amount of microseconds spent stalled because there is not enough buffer at the sender.
+
+
+class Measurement(TypedDict):
+    AppInfo: Optional[AppInfo]  # application-level measurement
+    ConnectionInfo: Optional[ConnectionInfo]  # used to provide information about the connection four tuple
+    Origin: Optional[str]  # Whether the measurement has been performed by the client or by the server.
+    Test: Optional[str]  # The name of the current test
+    TCPInfo: Optional[TCPInfo]  # The TCP_INFO stats
+    
 class NDT7:
     USER_AGENT = "aionettools-ndt7"
     WEBSOCKET_SUBPROTOCOL = "net.measurementlab.ndt.v7"
@@ -78,7 +112,7 @@ class NDT7:
         remote_ip_port = format_ip_port(websocket.remote_address)
         transferred_bytes = 0
 
-        measurements_queue = Queue()
+        measurements_queue = Queue[Measurement]()
 
         measurement_period = 0.1
         start = timer()
@@ -92,7 +126,7 @@ class NDT7:
                 elapsed_us = int(1e6 * (timer() - start))
                 tcpinfo = get_tcpinfo(sock)
                 # print(tcpinfo)
-                measurement = {
+                measurement: Measurement = {
                     "AppInfo": {
                         "ElapsedTime": elapsed_us,
                         "NumBytes": transferred_bytes,
@@ -152,6 +186,13 @@ class NDT7:
                     transferred_bytes += len(message)
                 elif isinstance(message, str):
                     measurement = json.loads(message)
+                    if "AppInfo" not in measurement:
+                        elapsed_us = int(1e6 * (timer() - start))
+                        measurement["AppInfo"] = {
+                            "ElapsedTime": elapsed_us,
+                            "NumBytes": transferred_bytes,
+                        }
+                    measurement["Origin"]: role.reversed.name
                     measurements_queue.put_nowait((measurement_direction, measurement))
 
         tasks: List[Task] = list(
@@ -181,7 +222,7 @@ class NDT7:
         urls: Mapping[str, str]
 
         @staticmethod
-        def from_url(base_url: str) -> Self:
+        def from_url(base_url: str) -> NDT7.Client:
             url = URL(base_url)
             scheme = "wss" if url.scheme in ("https", "wss") else "ws"
             return NDT7.Client(
@@ -199,14 +240,6 @@ class NDT7:
             ) as websocket:
                 async for direction, measurement in NDT7.handle_websocket(websocket, direction):
                     yield direction, measurement
-
-        async def test_pretty(self, direction: NDT7.Direction):
-            from aionettools.ndt7_progress import TransferSpeedBar
-
-            with TransferSpeedBar(direction) as bar:
-                async for measurement_direction, measurement_data in self.test(direction):
-                    if measurement_direction == direction:
-                        bar.update(measurement=measurement_data)
 
     @staticmethod
     class Server (websockets.server.serve):
@@ -236,43 +269,16 @@ class NDT7:
 
             
         async def handler(self, websocket: WebSocketServerProtocol):
-            from aionettools.ndt7_progress import TransferSpeedBar
-
             direction = Direction.download if websocket.path.endswith("/download") else Direction.upload
-            with TransferSpeedBar(direction) as bar:
-                async for measurement_direction, measurement_data in NDT7.handle_websocket(websocket, direction, Role.server):
-                    if measurement_direction == direction:
-                        bar.update(measurement=measurement_data)
+            await self.handle_measurements(direction, NDT7.handle_websocket(websocket, direction, Role.server))                
+
+        async def handle_measurements(self, direction: Direction, test_data: AsyncIterable[Tuple[Direction, Measurement]]):
+            async for _ in test_data:
+                ...
 
         async def process_request(self, path: str, request_headers: Headers):
             for direction in Direction:
                 if path == f"/ndt/v7/{direction.name}":
-                    print(path)
                     return None
 
             return HTTPStatus.NOT_FOUND, {}, b"Not found"
-
-@async_command
-async def ndt7_main(
-    base_url: Optional[str] = typer.Argument(
-        None, metavar="URL", help="Base URL of the host to test"
-    ),
-    server: bool = typer.Option(
-        False, "--server", help="Acts as a NDT7 server instead of a client"
-    ),
-):
-
-    if server:
-        async with NDT7.Server(base_url) as server:
-            print(f"Server: {type(server)}")
-            print(f"Waiting for clients on {server.url}")
-            await asyncio.get_event_loop().create_future()
-    else:
-        if base_url is None:
-            client = await NDT7.get_nearest_server()
-        else:
-            client = NDT7.Client.from_url(base_url)
-
-        #await ping_pretty([client.host], duration=1, interval=0.05, verbose=False)
-        await client.test_pretty(Direction.download)
-        await client.test_pretty(Direction.upload)

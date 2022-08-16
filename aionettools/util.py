@@ -1,12 +1,17 @@
+from __future__ import annotations
+
 import asyncio
 import socket
+from enum import Enum
 from functools import wraps
-from ipaddress import IPv4Address, _BaseAddress, ip_address
+from ipaddress import IPv4Address, IPv6Address, _BaseAddress, ip_address
+from math import floor
 from time import perf_counter
 from typing import Any, Iterable, List, Tuple
-
+import pytimeparse
 import typer
 from websockets import WebSocketCommonProtocol
+
 
 test_hostnames = [
     "localhost",
@@ -17,6 +22,7 @@ test_hostnames = [
     "netflix.com",
     "google.com",
 ]
+
 
 def timer():
     return perf_counter()
@@ -40,6 +46,21 @@ def format_ip_port(addr: Tuple[Any]) -> str:
         return f"[{ip}]:{addr[1]}"
 
 
+def quantiles(data: List[float], quantiles: List[float]):
+    if not data:
+        return None
+
+    ret: List[float] = []
+    for quantile in quantiles:
+        i = quantile * (len(data) - 1)
+        i_int = floor(i)
+        i_frac = i - i_int
+        value = (1 - i_frac) * data[i_int]
+        if i_frac > 0:
+            value += (i_frac) * data[i_int + 1]
+        ret.append(value)
+
+
 def get_sock_from_websocket(websocket: WebSocketCommonProtocol) -> socket.socket:
     transport = websocket.transport
     try:
@@ -58,15 +79,28 @@ def get_sock_from_websocket(websocket: WebSocketCommonProtocol) -> socket.socket
     return None
 
 
-def async_command(f):
-    @wraps(f)
-    def wrapper(*args, **kwargs):
-        try:
-            asyncio.run(f(*args, **kwargs))
-        except KeyboardInterrupt:
-            pass
+def async_command(app, *args, **kwargs):
+    @wraps(app.command)
+    def decorator(f):
+        @app.command(*args, **kwargs)
+        @wraps(f)
+        def wrapper(*args, **kwargs):
+            async def f_with_signal(*args, **kwargs):
+                task = asyncio.create_task(f(*args, **kwargs))
+                asyncio.get_event_loop()
+                for signame in ("SIGINT", "SIGTERM"):
+                    # loop.add_signal_handler(getattr(signal, signame), task.cancel, signame)
+                    ...
+                try:
+                    return await task
+                except asyncio.CancelledError:
+                    ...
 
-    return wrapper
+            return asyncio.run(f_with_signal(*args, **kwargs))
+
+        return f
+
+    return decorator
 
 
 def autocomplete(values: Iterable[str], name: str = "", fast: bool = False):
@@ -79,3 +113,25 @@ def autocomplete(values: Iterable[str], name: str = "", fast: bool = False):
                     break
 
     return wrapped
+
+
+class IPVersion(Enum):
+    IPv4 = 4
+    IPv6 = 6
+
+    @staticmethod
+    def from_address(addr: _BaseAddress) -> IPVersion:
+        if isinstance(addr, IPv4Address):
+            return IPVersion.IPv4
+        elif isinstance(addr, IPv6Address):
+            return IPVersion.IPv6
+        else:
+            raise ValueError("Unsupported address type")
+
+def parse_interval(value) -> float:
+    if isinstance(value, int | float):
+        return value
+    try:
+        return pytimeparse.parse(value)
+    except ValueError:
+        return float(value)

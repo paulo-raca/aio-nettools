@@ -7,25 +7,24 @@ packages = [
     { include = "aionettools" },
 ]
 [tool.poetry.scripts]
-aionetttools = 'aionettools.main:main'
-aioping = 'aionettools.main:ping'
-aiondt7 = 'aionettools.main:ndt7'
+aionetttools = 'aionettools.main:app'
+aioping = 'aionettools.ping:app'
+aiondt7 = 'aionettools.ndt7:app'
 
 [tool.poetry.dependencies]
 python = "^3.10"
-speedtest = "^0.0.1"
 cachetools = "^5.2.0"
-aiotestspeed = "^0.0.1"
 typing-extensions = "^4.3.0"
 httpx = "^0.23.0"
 websockets = "^10.3"
-tcpinfo = "^0.2.2"
 progressbar2 = "^4.0.0"
 more-itertools = "^8.13.0"
-termcolor = "^1.1.0"
-typer = {extras = ["all"], version = "^0.6.1"}
+typer = {git = "https://github.com/paulo-raca/typer.git", branch = "custom-types"}
 sortedcontainers = "^2.4.0"
 yarl = "^1.8.1"
+aiotestspeed = {git = "https://github.com/abrookins/aiotestspeed.git"}
+pytimeparse = "^1.1.8"
+rich = "^12.5.1"
 
 [tool.poetry.dev-dependencies]
 pytest = "^7.1.1"

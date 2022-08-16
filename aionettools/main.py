@@ -1,24 +1,18 @@
+from typing import Mapping
 import typer
 
-import aionettools.ndt7 as ndt7
-import aionettools.ping as ping
+from aionettools.ndt7 import app as ndt7_app
+from aionettools.ping import app as ping_app
 
-cmds = {
-  "ping": ping.ping_main,
-  "ndt7": ndt7.ndt7_main,
+app = typer.Typer()
+
+nested_apps: Mapping[str, typer.Typer] = {
+  "ping": ping_app,
+  "ndt7": ndt7_app,
 }
 
-__all__ = ["app"]
-main = typer.Typer()
-for cmd_name, cmd_func in cmds.items():
-    main.command(cmd_name)(cmd_func)
-
-    cmd_app = typer.Typer()
-    cmd_app.command()(cmd_func)
-
-    globals()[cmd_name] = cmd_app
-    __all__.append(cmd_name)
-
-from rich import print
-from rich.console import group
-from rich.panel import Panel
+for nested_name, nested_app in nested_apps.items():
+    if len(nested_app.registered_commands) == 1 and len(nested_app.registered_groups) == 0:
+        app.command(nested_name)(nested_app.registered_commands[0].callback)
+    else:
+        app.add_typer(nested_app, name=nested_name)
