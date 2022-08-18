@@ -93,10 +93,10 @@ async def ping_pretty(
                     }
                     return ret
 
-                elastic.log("ping", ping_summary())
-                elastic.log("ping", ping_summary(by_host=True))
-                elastic.log("ping", ping_summary(by_host=True, by_ip_version=True))
-                elastic.log("ping", ping_summary(by_host=True, by_ip_address=True))
+                #elastic.log("ping", ping_summary())
+                #elastic.log("ping", ping_summary(by_host=True))
+                #elastic.log("ping", ping_summary(by_host=True, by_ip_version=True))
+                #elastic.log("ping", ping_summary(by_host=True, by_ip_address=True))
                 elastic.log("ping", {
                         "@timestamp": result.timestamp.isoformat(),
                         "summary": False,
@@ -112,7 +112,6 @@ async def ping_pretty(
             if interval is None:
                 interval = 0.005 if flood else 0.25
             total_count = count * len(hostnames) if count is not None else None
-            interval /= len(hostnames)
             total_sent = 0
             
             end = timer() + duration if duration is not None else None
